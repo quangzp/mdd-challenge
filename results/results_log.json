@@ -1,0 +1,31 @@
+{
+  "naive_B0_canonical": {
+    "f1": 0.0,
+    "per": 0.005600149337315662,
+    "der": 0.0,
+    "score": 0.49943998506626847
+  },
+  "naive_B1_oracle": {
+    "f1": 1.0,
+    "per": 0.0,
+    "der": 0.0,
+    "score": 1.0
+  },
+  "naive_B2_empty": {
+    "f1": 0.010764662212323682,
+    "per": 1.0,
+    "der": 0.9,
+    "score": 0.045382331106161834
+  },
+  "split_info": {
+    "valid_speakers": [
+      "S0003",
+      "S0008"
+    ],
+    "n_train": 2720,
+    "n_valid": 460,
+    "train_error_rate": 0.0871,
+    "valid_error_rate": 0.1,
+    "vocab_size": 123
+  }
+}
