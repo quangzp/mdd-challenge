@@ -148,10 +148,22 @@ def mismatch_analysis(epoch_json_path, start_epoch=10):
           f'mean(ep{int(h2[0]["epoch"])}-{int(h2[-1]["epoch"])})='
           f'{np.mean([x["prec"] for x in h2]):.4f}  '
           f'Δ={delta:+.4f}')
-    if abs(delta) < 0.005:
-        print('DIAGNOSIS: Precision PLATEAU confirmed — MISMATCH between CTC loss and MDD metric.')
+    # Use Spearman r(PER_noerr, Precision) as primary mismatch signal — more reliable than Δ
+    per_ne_clean = [x for x in per_ne if x is not None]
+    prec_clean   = [prec[i] for i, x in enumerate(per_ne) if x is not None]
+    r_per_prec, p_per_prec = (spearmanr(per_ne_clean, prec_clean)
+                               if len(per_ne_clean) >= 5 else (0.0, 1.0))
+    coupling = f'r(PER_noerr,Precision)={r_per_prec:+.3f} p={p_per_prec:.3f}'
+    print(f'  Half-avg Δ={delta:+.4f}  |  {coupling}')
+    if r_per_prec < -0.5 and p_per_prec < 0.05:
+        print('DIAGNOSIS: COUPLING INTACT — reducing PER_noerr → Precision improvement.')
+        print('  Diminishing returns in absolute Δ ≠ mismatch. Bottleneck = hard phoneme errors.')
+        print('  → Phoneme-group calibration or targeted fine-tuning (Stage 7).')
+    elif abs(r_per_prec) < 0.3 or p_per_prec > 0.10:
+        print('DIAGNOSIS: OBJECTIVE MISMATCH — PER_noerr and Precision decoupled.')
+        print('  Generic CTC training exhausted. Need detection-specific objective.')
     else:
-        print(f'DIAGNOSIS: Precision still shifting ({delta:+.4f}) — some training signal remains.')
+        print(f'DIAGNOSIS: WEAK COUPLING (r={r_per_prec:+.3f}) — diminishing returns.')
 
 
 # ── Task 4: Calibration ───────────────────────────────────────────────────────
@@ -425,4 +437,127 @@ def gop_pr_sweep(gt_c, gt_t, logits, id2phone, phone2id,
                'f1': f1, 'score': m['score']}
         results.append(row)
         print(f'{thr:8.1f}  {prec:.4f}  {rec:.4f}  {f1:.4f}  {m["score"]:.4f}')
+    return results
+
+
+# ── Stage 7: FP Rate + Confusion + Group Calibration ─────────────────────────
+
+def phoneme_fp_rate_table(gt_c, gt_t, preds, top_n=20):
+    """Compute per-phoneme FP rate = FP_count / total_canonical_occurrences.
+
+    Also builds confusion matrix (what model predicts at FP positions).
+
+    Returns: fp_counts, occurrences, fp_rates, confusion
+    """
+    from collections import defaultdict, Counter
+
+    occ = Counter()
+    for c in gt_c:
+        for tok in c.replace('*', '').replace('$', '').split():
+            occ[tok] += 1
+
+    fp_count = Counter()
+    confusion = defaultdict(Counter)
+
+    for c, t, p in zip(gt_c, gt_t, preds):
+        rs, hs, op_rh = _align_pair(c, t)
+        hs2, os2, op_ho = _align_pair(t, p)
+        flag = 0
+        for i in range(len(hs)):
+            if hs[i] == '<eps>': continue
+            while flag < len(hs2) and hs2[flag] == '<eps>': flag += 1
+            if flag < len(hs2) and hs[i] == hs2[flag]:
+                if op_rh[i] == 'C' and op_ho[flag] != 'C':
+                    canon   = rs[i]   if rs[i]   != '<eps>' else '<blank_pos>'
+                    pred_ph = os2[flag] if os2[flag] != '<eps>' else '<deleted>'
+                    fp_count[canon] += 1
+                    confusion[canon][pred_ph] += 1
+                flag += 1
+
+    fp_rates = {ph: fp_count[ph] / occ[ph]
+                for ph in fp_count if occ.get(ph, 0) > 0}
+
+    print(f'{"Phoneme":14s}  {"FP":5s}  {"Occ":5s}  {"FP_rate":8s}  {"Top confusion (pred: cnt%)"}')
+    print('-' * 78)
+    for ph, rate in sorted(fp_rates.items(), key=lambda x: -x[1])[:top_n]:
+        fp_c = fp_count[ph]
+        oc   = occ[ph]
+        top1 = confusion[ph].most_common(1)[0] if confusion[ph] else ('-', 0)
+        top1_pct = top1[1] / fp_c * 100 if fp_c > 0 else 0
+        print(f'  {ph:12s}  {fp_c:5d}  {oc:5d}  {rate:8.3f}  {top1[0]} ({top1_pct:.0f}%)')
+
+    return dict(fp_count), dict(occ), fp_rates, dict(confusion)
+
+
+def phoneme_confusion_detail(confusion, phonemes, min_fp=5):
+    """Print top-3 confusion for selected phonemes."""
+    print(f'\n{"Canonical":14s}  {"FP":5s}  {"Top-3 predicted (count %)"}')
+    print('-' * 70)
+    for ph in phonemes:
+        if ph not in confusion: continue
+        counter = confusion[ph]
+        total = sum(counter.values())
+        if total < min_fp: continue
+        top3 = counter.most_common(3)
+        top3_str = '  |  '.join(f'{p}: {c} ({c/total*100:.0f}%)' for p, c in top3)
+        print(f'  {ph:12s}  {total:5d}  {top3_str}')
+
+
+def group_calibrated_predictions(gt_c, preds, confidences,
+                                  default_threshold=0.70,
+                                  group_thresholds=None):
+    """Per-canonical-phoneme confidence threshold.
+
+    Positions where canonical ∈ group_thresholds use that threshold.
+    All other positions use default_threshold.
+    """
+    if group_thresholds is None:
+        group_thresholds = {}
+    filtered = []
+    for c, pred, conf in zip(gt_c, preds, confidences):
+        if not pred.strip():
+            filtered.append(pred)
+            continue
+        ca, pa = _align2(c, pred)
+        conf_map = dict(enumerate(conf))
+        new_tokens, p_idx = [], 0
+        for ct, pa_t in zip(ca, pa):
+            if pa_t == '<eps>': continue
+            cur_conf = conf_map.get(p_idx, 1.0)
+            p_idx += 1
+            thr = group_thresholds.get(ct, default_threshold)
+            if ct != '<eps>' and pa_t != ct and cur_conf < thr:
+                new_tokens.append(ct)
+            else:
+                new_tokens.append(pa_t)
+        filtered.append(' '.join(new_tokens))
+    return filtered
+
+
+def group_calibration_sweep(gt_c, gt_t, base_preds, confidences,
+                              group_phones, group_thresholds=None,
+                              default_threshold=0.70):
+    """Sweep group threshold while holding default_threshold fixed."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from utils import evaluate_on_valid
+
+    if group_thresholds is None:
+        group_thresholds = [0.70, 0.80, 0.90, 0.95, 0.98, 1.0]
+
+    results = []
+    print(f'{"grp_thr":7s}  {"P":7s}  {"R":7s}  {"F1":7s}  {"Score":7s}  '
+          f'(default_thr={default_threshold}, group_n={len(group_phones)})')
+    print('-' * 60)
+    for g_thr in group_thresholds:
+        grp = {p: g_thr for p in group_phones}
+        cal  = group_calibrated_predictions(
+            gt_c, base_preds, confidences,
+            default_threshold=default_threshold,
+            group_thresholds=grp)
+        prec, rec, f1 = _compute_pr_from_preds(gt_c, gt_t, cal)
+        m = evaluate_on_valid(gt_c, gt_t, cal)
+        results.append({'grp_thr': g_thr, 'precision': prec,
+                        'recall': rec, 'f1': f1, 'score': m['score']})
+        print(f'{g_thr:7.2f}  {prec:.4f}  {rec:.4f}  {f1:.4f}  {m["score"]:.4f}')
     return results
