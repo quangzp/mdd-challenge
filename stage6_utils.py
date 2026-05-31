@@ -188,7 +188,7 @@ def calibrated_predictions(gt_c, preds, confidences, threshold):
             filtered.append(pred)
             continue
 
-        ca, pa = _align_pair(c, pred)
+        ca, pa, _ = _align_pair(c, pred)
         conf_map = dict(enumerate(conf))
 
         new_tokens, p_idx = [], 0
@@ -334,7 +334,7 @@ def gop_scores(logits, gt_c, id2phone, phone2id, blank_penalty=0.0):
         pred_str = ' '.join(ph_list)
         all_preds.append(pred_str)
 
-        ca, pa = _align_pair(c_str, pred_str)
+        ca, pa, _ = _align_pair(c_str, pred_str)
         gops, p_idx = [], 0
         for ct, pt in zip(ca, pa):
             if pt == '<eps>':
@@ -375,7 +375,7 @@ def gop_calibrated_predictions(gt_c, preds, gop_scores_list, gop_threshold):
         if not pred.strip():
             filtered.append(pred)
             continue
-        ca, pa = _align_pair(c, pred)
+        ca, pa, _ = _align_pair(c, pred)
         new_tokens, gop_idx = [], 0
         for ct, pt in zip(ca, pa):
             if pt == '<eps>':
