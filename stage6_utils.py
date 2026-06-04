@@ -561,3 +561,80 @@ def group_calibration_sweep(gt_c, gt_t, base_preds, confidences,
                         'recall': rec, 'f1': f1, 'score': m['score']})
         print(f'{g_thr:7.2f}  {prec:.4f}  {rec:.4f}  {f1:.4f}  {m["score"]:.4f}')
     return results
+
+
+# ── Stage 8: Calibration Ceiling + Tone-Group Analysis ───────────────────────
+
+def calibration_ceiling_sweep(gt_c, gt_t, base_preds, confidences,
+                               fp_rates, fp_cnt,
+                               default_threshold=0.90,
+                               k_values=None,
+                               min_fp_for_inclusion=5):
+    """Sweep group size K: top-K phonemes by FP rate, fully suppressed (grp_thr=1.0).
+
+    Finds the optimal K that maximizes Score.
+    fp_rates: {phoneme: rate} from phoneme_fp_rate_table()
+    fp_cnt:   {phoneme: int}  for min-count filter
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from utils import evaluate_on_valid
+
+    if k_values is None:
+        k_values = [0, 5, 10, 15, 20, 25, 30, 35, 40, 50]
+
+    eligible = [(ph, r) for ph, r in fp_rates.items()
+                if fp_cnt.get(ph, 0) >= min_fp_for_inclusion]
+    sorted_phones = [ph for ph, _ in sorted(eligible, key=lambda x: -x[1])]
+
+    results = []
+    print(f'{"K":4s}  {"P":7s}  {"R":7s}  {"F1":7s}  {"Score":7s}  {"top_suppressed"}')
+    print('-' * 68)
+    for k in k_values:
+        group = sorted_phones[:k]
+        grp_thr = {p: 1.0 for p in group}
+        cal = group_calibrated_predictions(
+            gt_c, base_preds, confidences,
+            default_threshold=default_threshold,
+            group_thresholds=grp_thr)
+        prec, rec, f1 = _compute_pr_from_preds(gt_c, gt_t, cal)
+        m = evaluate_on_valid(gt_c, gt_t, cal)
+        sample = group[0] if group else '(none)'
+        results.append({'k': k, 'group': group, 'precision': prec,
+                        'recall': rec, 'f1': f1, 'score': m['score']})
+        print(f'{k:4d}  {prec:.4f}  {rec:.4f}  {f1:.4f}  {m["score"]:.4f}  {sample}')
+    return results
+
+
+def tone_group_fp_analysis(fp_cnt, occ, fp_rates):
+    """Compare FP rates across phoneme groups (tone-0..5, z-suffix, other).
+
+    Uses fp_cnt and occ from phoneme_fp_rate_table().
+    Returns group_rates dict.
+    """
+    groups = {**{f'tone-{t}': [] for t in range(6)}, 'z-suffix': [], 'other': []}
+    for ph in occ:
+        if ph.startswith('<'): continue
+        parts = ph.split('-')
+        if len(parts) >= 2 and parts[-1].isdigit() and int(parts[-1]) < 6:
+            groups[f'tone-{parts[-1]}'].append(ph)
+        elif ph.endswith('z'):
+            groups['z-suffix'].append(ph)
+        else:
+            groups['other'].append(ph)
+
+    print(f'{"Group":12s}  {"#phones":7s}  {"tot_FP":7s}  {"tot_occ":8s}  '
+          f'{"group_rate":10s}  {"median_rate":11s}')
+    print('-' * 72)
+    group_rates = {}
+    for grp in sorted(groups):
+        phones = groups[grp]
+        g_fp   = sum(fp_cnt.get(p, 0) for p in phones)
+        g_occ  = sum(occ.get(p, 0)    for p in phones)
+        g_rates = [fp_rates[p] for p in phones if p in fp_rates]
+        med  = float(np.median(g_rates)) if g_rates else 0.0
+        rate = g_fp / max(1, g_occ)
+        group_rates[grp] = rate
+        print(f'  {grp:10s}  {len(phones):7d}  {g_fp:7d}  {g_occ:8d}  '
+              f'{rate:10.3f}  {med:11.3f}')
+    return group_rates
