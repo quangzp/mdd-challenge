@@ -663,3 +663,66 @@ def tone_group_suppression(gt_c, preds, confidences,
         gt_c, preds, confidences,
         default_threshold=default_threshold,
         group_thresholds=group_thr)
+
+
+# ── Stage 10: Per-Phoneme TP/FP Breakdown ────────────────────────────────────
+
+def phoneme_tp_fp_breakdown(gt_c, gt_t, preds, top_n=30):
+    """Per-phoneme TP, FP, precision attributed to canonical phoneme.
+
+    FP: cor_nocor events → correctly-pronounced canonical phoneme was flagged as error
+    TP: events where human made an error (op_rh != C) AND model detected it (op_ho != C)
+        Attributed to the canonical phoneme at that position (rs[i]).
+
+    Returns:
+      result      : dict {phoneme: {'tp': int, 'fp': int, 'precision': float, 'occ': int}}
+      sorted_prec : list of (phoneme, dict) sorted by precision descending
+    """
+    from collections import Counter
+
+    occ = Counter()
+    for c in gt_c:
+        for tok in c.replace('*', '').replace('$', '').split():
+            occ[tok] += 1
+
+    tp_by_ph = Counter()
+    fp_by_ph = Counter()
+
+    for c, t, p in zip(gt_c, gt_t, preds):
+        rs, hs, op_rh = _align_pair(c, t)
+        hs2, os2, op_ho = _align_pair(t, p)
+        rs3, os3, op_ro = _align_pair(c, p)
+
+        # Walk human_seq × op_rh alongside human_seq2 × op_ho
+        flag = 0
+        for i in range(len(hs)):
+            if hs[i] == '<eps>':
+                continue
+            while flag < len(hs2) and hs2[flag] == '<eps>':
+                flag += 1
+            if flag < len(hs2) and hs[i] == hs2[flag]:
+                canon = rs[i] if rs[i] != '<eps>' else '<ins_pos>'
+                if op_rh[i] == 'C' and op_ho[flag] != 'C':
+                    fp_by_ph[canon] += 1              # False Positive
+                elif op_rh[i] != 'C' and op_ho[flag] != 'C':
+                    tp_by_ph[canon] += 1              # True Positive (error detected)
+                flag += 1
+
+    all_phones = set(tp_by_ph.keys()) | set(fp_by_ph.keys())
+    result = {}
+    for ph in all_phones:
+        tp   = tp_by_ph.get(ph, 0)
+        fp   = fp_by_ph.get(ph, 0)
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        result[ph] = {'tp': tp, 'fp': fp, 'precision': prec, 'occ': occ.get(ph, 0)}
+
+    sorted_prec = sorted(result.items(), key=lambda x: (-x[1]['precision'], -x[1]['tp']))
+
+    print(f'{"Phoneme":14s}  {"TP":5s}  {"FP":5s}  {"Prec":7s}  {"Occ":5s}  {"bar"}')
+    print('-' * 58)
+    for ph, d in sorted_prec[:top_n]:
+        bar = '█' * int(d['precision'] * 20)
+        print(f'  {ph:12s}  {d["tp"]:5d}  {d["fp"]:5d}  {d["precision"]:7.3f}  '
+              f'{d["occ"]:5d}  {bar}')
+
+    return result, sorted_prec
