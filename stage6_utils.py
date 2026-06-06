@@ -670,9 +670,15 @@ def tone_group_suppression(gt_c, preds, confidences,
 def phoneme_tp_fp_breakdown(gt_c, gt_t, preds, top_n=30):
     """Per-phoneme TP, FP, precision attributed to canonical phoneme.
 
-    FP: cor_nocor events → correctly-pronounced canonical phoneme was flagged as error
-    TP: events where human made an error (op_rh != C) AND model detected it (op_ho != C)
-        Attributed to the canonical phoneme at that position (rs[i]).
+    Mirrors evaluate.py compute_f1 exactly for 6 TR components:
+      sub_sub:  op_rh=='S', op_ho=='C'           → TP (model correctly predicts transcript error)
+      sub_sub1: op_rh=='S', op_ho!='C', ref!=our → TP (detects error, wrong diagnosis)
+      del_del:  op_rh=='D', op_ro=='D'            → TP
+      del_del1: op_rh=='D', op_ro not in ('D','C') → TP
+      ins_ins:  op_rh=='I', op_ho=='C'            → TP
+      ins_ins1: op_rh=='I', op_ho not in ('C','D') → TP
+
+    FP: cor_nocor — op_rh=='C', op_ho!='C'
 
     Returns:
       result      : dict {phoneme: {'tp': int, 'fp': int, 'precision': float, 'occ': int}}
@@ -693,7 +699,21 @@ def phoneme_tp_fp_breakdown(gt_c, gt_t, preds, top_n=30):
         hs2, os2, op_ho = _align_pair(t, p)
         rs3, os3, op_ro = _align_pair(c, p)
 
-        # Walk human_seq × op_rh alongside human_seq2 × op_ho
+        # ── Deletion TPs: walk ref_seq (rs) alongside ref_our (rs3) ──────────
+        flag2 = 0
+        for ii in range(len(rs)):
+            if rs[ii] == '<eps>':
+                continue
+            while flag2 < len(rs3) and rs3[flag2] == '<eps>':
+                flag2 += 1
+            if flag2 < len(rs3) and rs[ii] == rs3[flag2]:
+                if op_rh[ii] == 'D' and op_ro[flag2] == 'D':
+                    tp_by_ph[rs[ii]] += 1            # del_del
+                elif op_rh[ii] == 'D' and op_ro[flag2] not in ('D', 'C'):
+                    tp_by_ph[rs[ii]] += 1            # del_del1
+                flag2 += 1
+
+        # ── Substitution/Insertion FPs and TPs: walk human_seq (hs) ─────────
         flag = 0
         for i in range(len(hs)):
             if hs[i] == '<eps>':
@@ -702,10 +722,23 @@ def phoneme_tp_fp_breakdown(gt_c, gt_t, preds, top_n=30):
                 flag += 1
             if flag < len(hs2) and hs[i] == hs2[flag]:
                 canon = rs[i] if rs[i] != '<eps>' else '<ins_pos>'
+
                 if op_rh[i] == 'C' and op_ho[flag] != 'C':
-                    fp_by_ph[canon] += 1              # False Positive
-                elif op_rh[i] != 'C' and op_ho[flag] != 'C':
-                    tp_by_ph[canon] += 1              # True Positive (error detected)
+                    fp_by_ph[canon] += 1             # False Positive (cor_nocor)
+
+                elif op_rh[i] == 'S' and op_ho[flag] == 'C':
+                    tp_by_ph[canon] += 1             # sub_sub
+
+                elif (op_rh[i] == 'S' and op_ho[flag] != 'C'
+                      and rs[i] != os2[flag]):
+                    tp_by_ph[canon] += 1             # sub_sub1
+
+                elif op_rh[i] == 'I' and op_ho[flag] == 'C':
+                    tp_by_ph['<ins_pos>'] += 1       # ins_ins
+
+                elif op_rh[i] == 'I' and op_ho[flag] not in ('C', 'D'):
+                    tp_by_ph['<ins_pos>'] += 1       # ins_ins1
+
                 flag += 1
 
     all_phones = set(tp_by_ph.keys()) | set(fp_by_ph.keys())
@@ -718,7 +751,10 @@ def phoneme_tp_fp_breakdown(gt_c, gt_t, preds, top_n=30):
 
     sorted_prec = sorted(result.items(), key=lambda x: (-x[1]['precision'], -x[1]['tp']))
 
-    print(f'{"Phoneme":14s}  {"TP":5s}  {"FP":5s}  {"Prec":7s}  {"Occ":5s}  {"bar"}')
+    total_tp = sum(tp_by_ph.values())
+    total_fp = sum(fp_by_ph.values())
+    print(f'Total TPs: {total_tp}  |  Total FPs: {fp_by_ph.total() if hasattr(fp_by_ph, "total") else sum(fp_by_ph.values())}')
+    print(f'{"Phoneme":14s}  {"TP":5s}  {"FP":5s}  {"Prec":7s}  {"Occ":5s}  bar')
     print('-' * 58)
     for ph, d in sorted_prec[:top_n]:
         bar = '█' * int(d['precision'] * 20)
