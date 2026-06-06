@@ -638,3 +638,28 @@ def tone_group_fp_analysis(fp_cnt, occ, fp_rates):
         print(f'  {grp:10s}  {len(phones):7d}  {g_fp:7d}  {g_occ:8d}  '
               f'{rate:10.3f}  {med:11.3f}')
     return group_rates
+
+
+def tone_group_suppression(gt_c, preds, confidences,
+                            suppressed_tone_suffixes=None,
+                            default_threshold=0.90):
+    """Suppress predictions for ALL phonemes from specified tone groups.
+
+    suppressed_tone_suffixes: set of tone number strings, e.g. {'5'} or {'3','4','5'}.
+    Phonemes matching 'xxx-X' where X in suppressed_tone_suffixes are fully suppressed
+    (canonical always used for those positions, regardless of model prediction).
+    """
+    if suppressed_tone_suffixes is None:
+        suppressed_tone_suffixes = {'5'}
+    from collections import Counter
+    vocab = Counter()
+    for c in gt_c:
+        for tok in c.replace('*', '').replace('$', '').split():
+            vocab[tok] += 1
+    group_thr = {ph: 1.0
+                 for ph in vocab
+                 if '-' in ph and ph.split('-')[-1] in suppressed_tone_suffixes}
+    return group_calibrated_predictions(
+        gt_c, preds, confidences,
+        default_threshold=default_threshold,
+        group_thresholds=group_thr)
