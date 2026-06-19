@@ -1,508 +1,141 @@
-# Mispronunciation Detection and Diagnosis (MDD) — Problem Description
+# Vietnamese Mispronunciation Detection and Diagnosis (MDD)
 
-## 1. Tổng quan bài toán
-
-Bài toán này là **MDD — Mispronunciation Detection and Diagnosis**, không phải ASR thông thường.
-
-ASR thông thường tập trung vào việc chuyển đổi tín hiệu âm thanh thành văn bản:
-
-```text
-audio -> text
-```
-
-Trong khi đó, MDD tập trung vào việc đánh giá người nói có phát âm đúng theo cách phát âm chuẩn hay không.
-
-Nói cách khác, hệ thống không chỉ cần biết speaker nói gì, mà cần biết speaker **có phát âm đúng với câu/từ/phoneme được yêu cầu hay không**.
+Hệ thống phát hiện và chẩn đoán lỗi phát âm tiếng Việt, phát triển cho MDD Challenge 2025
+**Phương pháp:** Fine-tune `Wav2Vec2ForCTC` từ checkpoint tiếng Việt (`nguyenvulebinh/wav2vec2-base-vietnamese-250h`) với CTC loss để nhận dạng chuỗi âm vị, sau đó áp dụng bước hiệu chỉnh False Positive (FP Calibration) dựa trên tỷ lệ FP per-phoneme trên tập validation.
 
 ---
 
-## 2. Bản chất của MDD
+## Results
 
-MDD gồm hai nhiệm vụ chính:
+| Split | Score |
+|-------|-------|
+| Validation (460 mẫu) | 0.5867 |
+| Public test | 0.5906 |
+| **Private test** | **0.7160** |
 
-### 2.1 Mispronunciation Detection
-
-Detection trả lời câu hỏi:
-
-```text
-Speaker có phát âm sai không?
-Sai ở vị trí nào?
-```
-
-Ví dụ:
-
-```text
-Canonical:  con trâu ăn cỏ
-Transcript: con châu ăn cỏ
-```
-
-Ở đây speaker cần đọc từ `trâu`, nhưng thực tế phát âm thành `châu`.
-
-Detection cần xác định:
-
-```text
-Từ/phoneme tương ứng với "trâu" bị phát âm sai.
-```
-
-### 2.2 Mispronunciation Diagnosis
-
-Diagnosis trả lời câu hỏi:
-
-```text
-Sai như thế nào?
-Phoneme chuẩn là gì?
-Speaker đã phát âm thành phoneme gì?
-Loại lỗi là substitution, deletion hay insertion?
-```
-
-Ví dụ ở mức phoneme:
-
-```text
-Canonical:  k on $ tr aw
-Transcript: k on $ ch aw
-```
-
-Diagnosis cần xác định:
-
-```text
-tr -> ch
-error_type = substitution
-```
-
-Do đó, bài toán này không dừng ở việc phát hiện lỗi, mà cần **chẩn đoán cụ thể lỗi phát âm ở mức phoneme**.
+Score = 0.5 × F₁ + 0.4 × (1 − DER) + 0.1 × (1 − PER)
 
 ---
 
-## 3. Input của bài toán
+## Requirements
 
-Input chính gồm:
+- Python 3.10+
+- GPU (NVIDIA T4 16 GB hoặc tương đương, khuyến nghị)
 
-```text
-audio
-+
-canonical pronunciation / canonical text
-```
-
-Trong đó:
-
-- `audio`: file âm thanh do speaker đọc.
-- `canonical`: nội dung speaker được yêu cầu phát âm.
-- `canonical pronunciation`: chuỗi phoneme chuẩn tương ứng với canonical text.
-
-Ví dụ:
-
-```text
-audio: speaker đọc câu "con châu ăn cỏ"
-canonical: "con trâu ăn cỏ"
-canonical phones: k on $ tr aw $ ...
-```
-
-Mục tiêu là so sánh cách phát âm thực tế trong audio với cách phát âm chuẩn.
-
----
-
-## 4. Dataset
-
-The data used for the Mispronunciation Detection & Diagnosis Challenge is composed of two datasets. The first dataset [1] contains augmented recordings of adults speaking pairs of single-syllable Vietnamese words (released by MachinaX). The second dataset [2] features recordings of children aged 5 to 7, either speaking or reading Vietnamese sentences in passages or dialogues (released by SoICT-HUST and the Vietnam Psycho-Pedagogical Association).
-
-Danh sách Pretrained Models được sử dụng như sau:
-facebook/wav2vec2-base-100h, link ref: https://huggingface.co/facebook/wav2vec2-base-100h
-nguyenvulebinh/wav2vec2-base-vietnamese-250h, link ref: https://huggingface.co/nguyenvulebinh/wav2vec2-base-vietnamese-250h
-facebook/hubert-base-ls960, link ref: https://huggingface.co/facebook/hubert-base-ls960
-
-### 4.1 `train.csv`
-
-File `train.csv` gồm các trường chính:
-
-| Cột          | Ý nghĩa                           |
-| ------------ | --------------------------------- |
-| `id`         | ID của sample                     |
-| `path`       | Đường dẫn tới audio               |
-| `canonical`  | Câu/từ speaker cần phát âm        |
-| `transcript` | Câu/từ speaker thực tế đã phát âm |
-
-Ví dụ:
-
-| canonical      | transcript     |
-| -------------- | -------------- |
-| con trâu ăn cỏ | con châu ăn cỏ |
-
-Ý nghĩa:
-
-```text
-Expected pronunciation: "trâu"
-Actual pronunciation:   "châu"
-```
-
-Đây là dấu hiệu cho lỗi phát âm.
-
----
-
-### 4.2 `train_phones.csv`
-
-File `train_phones.csv` là phiên bản phoneme-level của dữ liệu.
-
-Ví dụ:
-
-| canonical    | transcript   |
-| ------------ | ------------ |
-| k on $ tr aw | k on $ ch aw |
-
-Trong đó dấu `$` dùng để phân tách giữa các từ.
-
-File này đặc biệt quan trọng vì MDD được đánh giá mạnh ở mức phoneme, thông qua các metric như PER và DER.
-
-Vai trò chính của `train_phones.csv`:
-
-- Tạo label phoneme-level.
-- Align canonical phoneme với actual/spoken phoneme.
-- Xác định lỗi substitution, deletion, insertion.
-- Huấn luyện phoneme recognizer hoặc error detection head.
-- Tính PER và hỗ trợ tính DER.
-
----
-
-### 4.3 `lexicon_vmd.txt`
-
-`lexicon_vmd.txt` là dictionary ánh xạ:
-
-```text
-word -> phoneme sequence
-```
-
-Ví dụ:
-
-```text
-trâu -> tr aw
-châu -> ch aw
-```
-
-Vai trò của lexicon trong MDD rất quan trọng. Nó là cầu nối giữa dữ liệu word-level và phoneme-level:
-
-```text
-canonical text
--> lexicon / G2P
--> canonical phoneme sequence
-```
-
-và:
-
-```text
-transcript text
--> lexicon / G2P
--> spoken phoneme sequence
-```
-
-Nhờ đó, hệ thống có thể tạo nhãn huấn luyện ở mức phoneme.
-
----
-
-## 5. Canonical vs Transcript
-
-### 5.1 Canonical
-
-`canonical` là nội dung speaker **được yêu cầu phát âm**.
-
-```text
-canonical = expected pronunciation
-```
-
-Ví dụ:
-
-```text
-trâu
-```
-
-### 5.2 Transcript
-
-`transcript` là nội dung speaker **thực tế đã phát âm**.
-
-```text
-transcript = actual pronunciation
-```
-
-Ví dụ:
-
-```text
-châu
-```
-
-Do đó, cặp canonical/transcript cho biết lỗi phát âm:
-
-```text
-Expected: trâu
-Actual:   châu
-```
-
-Ở mức phoneme:
-
-```text
-Expected: tr aw
-Actual:   ch aw
-```
-
-Lỗi diagnosis:
-
-```text
-tr -> ch
+```bash
+pip install torch transformers accelerate pandas numpy scipy
 ```
 
 ---
 
-## 6. Các loại lỗi trong MDD
+## Repository Structure
 
-MDD cần xử lý tối thiểu ba loại lỗi chính.
-
-### 6.1 Substitution
-
-Speaker phát âm một phoneme thành phoneme khác.
-
-```text
-canonical:  tr aw
-spoken:     ch aw
+```
+├── train.py             # Training CLI (local GPU)
+├── inference.py         # Inference trên test set
+├── fp_analysis.py       # Phân tích FP rate theo âm vị
+├── prepare_data.py      # Tạo splits/ và phone_vocab.json
+├── evaluate.py          # Scoring chính thức (F1, DER, PER, Score)
+├── utils.py             # Tiện ích chung (load audio, evaluate, ...)
+│
+├── splits/              # Generated by prepare_data.py
+│   ├── train_phones.csv
+│   ├── valid_phones.csv
+│   └── phone_vocab.json
+│
+└── kaggle/              # Notebook dùng trên Kaggle
+    ├── train.ipynb      # Training notebook (Kaggle hoặc Jupyter local)
+    └── mdd_utils.py
 ```
 
-Lỗi:
-
-```text
-tr -> ch
-```
-
-### 6.2 Deletion
-
-Speaker bỏ sót một phoneme cần phát âm.
-
-```text
-canonical:  tr aw
-spoken:        aw
-```
-
-Lỗi:
-
-```text
-tr -> <del>
-```
-
-### 6.3 Insertion
-
-Speaker phát âm thêm một phoneme không có trong canonical.
-
-```text
-canonical:  aw
-spoken:     ch aw
-```
-
-Lỗi:
-
-```text
-<ins> -> ch
-```
-
-Vì PER được tính từ substitution, deletion và insertion, internal representation của hệ thống cũng nên biểu diễn đủ ba loại lỗi này.
+> `checkpoint/` (model weights) không được commit — cần tự train hoặc download từ Kaggle.
 
 ---
 
-## 7. Alignment trong MDD
+## Setup
 
-Alignment là bước trung tâm của bài toán MDD.
+### 1. Clone repo
 
-Trước khi detect hoặc diagnose lỗi, cần align hai chuỗi:
-
-```text
-canonical phoneme sequence
-vs
-spoken / predicted phoneme sequence
+```bash
+git clone <repo-url>
+cd mdd-challenge
 ```
 
-Ví dụ:
+### 2. Tải dữ liệu
 
-```text
-canonical:  k on $ tr aw
-spoken:     k on $ ch aw
+Tải dataset từ MDD Challenge 2025, giải nén vào thư mục gốc:
+
+```
+MDD-Challenge-2025-training-set/
+  audio_data/train/       ← file WAV
+  metadata/
+    train.csv
+    train_phones.csv
 ```
 
-Sau alignment:
+### 3. Tạo splits và vocab
 
-```text
-k   on   $   tr   aw
-k   on   $   ch   aw
+```bash
+python prepare_data.py
 ```
 
-Diagnosis:
-
-```text
-tr -> ch
-```
-
-### 7.1 Alignment để tạo label training
-
-Vì `train_phones.csv` đã có cả `canonical` và `transcript` ở mức phoneme, hướng hợp lý để tạo label là dùng **Levenshtein alignment**.
-
-```text
-canonical_phone
-+
-transcript_phone
--> Levenshtein alignment
--> phoneme-level labels
-```
-
-Label thu được gồm:
-
-```text
-correct
-substitution
-deletion
-insertion
-expected_phone
-actual_phone
-```
-
-### 7.2 Alignment khi inference
-
-Ở inference, thường không có transcript thực tế. Khi đó hệ thống cần dự đoán spoken phoneme từ audio:
-
-```text
-audio
--> phoneme recognizer / CTC decoder
--> predicted spoken phoneme
-```
-
-Sau đó align:
-
-```text
-canonical_phone
-vs
-predicted_spoken_phone
-```
-
-Từ alignment này suy ra lỗi phát âm.
+Tạo ra `splits/train_phones.csv`, `splits/valid_phones.csv`, `splits/phone_vocab.json`.  
+Chiến lược chia theo người nói (speaker-based) để tránh data leakage.
 
 ---
 
-## 8. Metrics
+## Training
 
-Score tổng có dạng:
+### Kaggle (GPU T4 miễn phí — khuyến nghị)
 
-```text
-Score = 0.5 * F1_score + 0.4 * (1 - DER) + 0.1 * (1 - PER)
+1. Vào [Kaggle Notebooks](https://www.kaggle.com/code), tạo notebook mới
+2. Upload `kaggle/train.ipynb`
+3. Thêm dataset `mdd-challenge-2025` vào notebook
+4. **Run All** — checkpoint tốt nhất lưu tại `/kaggle/working/best_ckp/`
+5. Download thư mục đó về `checkpoint/` ở root của repo
+
+### Local (có GPU)
+
+```bash
+python train.py
 ```
 
-### 8.1 F1-score
+Hyperparameters mặc định: 30 epochs, encoder LR=2e-5, CTC head LR=2e-3, effective batch=16.
 
-F1-score đánh giá khả năng phát hiện đúng lỗi phát âm.
-
-Nó tập trung vào câu hỏi:
-
-```text
-Model có detect đúng vị trí/phần bị phát âm sai không?
-```
-
-### 8.2 PER — Phoneme Error Rate
-
-PER đo độ sai khác giữa chuỗi phoneme predicted và chuỗi phoneme reference.
-
-Công thức:
-
-```text
-PER = (S + D + I) / N
-```
-
-Trong đó:
-
-| Ký hiệu | Ý nghĩa                      |
-| ------- | ---------------------------- |
-| `S`     | số lỗi substitution          |
-| `D`     | số lỗi deletion              |
-| `I`     | số lỗi insertion             |
-| `N`     | số phoneme trong chuỗi chuẩn |
-
-PER càng thấp thì chuỗi phoneme predicted càng gần với chuỗi reference.
-
-### 8.3 DER — Diagnosis Error Rate
-
-DER là metric đánh giá phần diagnosis lỗi phát âm. Trong challenge này, công thức DER được định nghĩa trực tiếp trong `evaluate.py`.
-
-Script tính DER như sau:
-
-```text
-DER = DE / total_actual_errors
-```
-
-Trong đó:
-
-| Ký hiệu | Ý nghĩa |
-| ------- | ------- |
-| `DE` | Diagnosis Error: model phát hiện có lỗi nhưng chẩn đoán sai phoneme/loại lỗi |
-| `total_actual_errors` | Tổng số lỗi phát âm thật trong ground truth |
-
-Trong `evaluate.py`:
-
-```text
-DE = sub_sub1 + del_del1 + ins_ins1
-total_actual_errors = TR + FA
-```
-
-Vì vậy:
-
-- DER càng thấp càng tốt.
-- Nếu model phát hiện đúng vị trí lỗi nhưng dự đoán sai phoneme lỗi, lỗi đó được tính vào `DE`.
-- Nếu model bỏ sót lỗi thật, lỗi đó được tính vào `FA`.
-- Nếu không có lỗi thật nào trong dữ liệu, DER được trả về `0.0`.
-
-Ví dụ, nếu speaker phát âm:
-
-```text
-tr -> ch
-```
-
-thì model không chỉ cần phát hiện có lỗi, mà còn cần dự đoán đúng pair diagnosis:
-
-```text
-expected_phone = tr
-actual_phone = ch
-error_type = substitution
+```bash
+# Tuỳ chỉnh:
+python train.py --epochs 30 --output-dir checkpoint
 ```
 
 ---
 
-## 9. Format submission / prediction
+## Inference
 
-Theo `evaluate.py`, file prediction cần là CSV có cột:
-
-```text
-predict
+```bash
+python inference.py public    # → result_public.csv
+python inference.py private   # → result.csv
 ```
 
-Ground truth cần có các cột:
+Pipeline:
+1. Chạy model trên validation set → tính FP rate per phoneme
+2. Chạy model trên test set
+3. Áp dụng FP calibration (K=50 suppress set, τ=0.90)
+4. Ghi kết quả ra CSV
 
-```text
-canonical,transcript
+---
+
+## Phân tích FP rate
+
+```bash
+python fp_analysis.py   # In top phonemes có FP rate cao, K/tau sweep
 ```
 
-Hai file được so khớp theo thứ tự dòng, tức là dòng thứ `i` trong `results.csv` sẽ được so với dòng thứ `i` trong ground truth. Vì vậy thứ tự sample phải được giữ nguyên.
+---
 
-Trước khi align, `evaluate.py` xử lý chuỗi phoneme bằng:
+## References
 
-```python
-s.replace("*", "").replace("$", "").split()
-```
-
-Điều này có nghĩa là:
-
-- Dấu `$` phân tách từ sẽ bị loại bỏ khi tính metric.
-- Dấu `*` cũng bị loại bỏ.
-- Metric thực sự chạy trên danh sách phoneme sau khi `split()`.
-
-File `evaluate.py` in ra riêng:
-
-```text
-F1
-PER
-DER
-```
-
-Nó chưa trực tiếp tính score tổng:
-
-```text
-Score = 0.5 * F1_score + 0.4 * (1 - DER) + 0.1 * (1 - PER)
-```
+- Baevski et al. (2020). *wav2vec 2.0: A Framework for Self-Supervised Learning of Speech Representations.* NeurIPS 2020.
+- Graves et al. (2006). *Connectionist Temporal Classification.* ICML 2006.
+- Hsu et al. (2021). *HuBERT: Self-Supervised Speech Representation Learning.* IEEE/ACM TASLP.
+- Nguyen Van Le Binh. *wav2vec2-base-vietnamese-250h.* HuggingFace, 2020.
+- Wolf et al. (2020). *Transformers: State-of-the-Art NLP.* EMNLP 2020.

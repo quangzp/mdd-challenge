@@ -1,4 +1,4 @@
-"""stage6_utils.py — Stage 6 diagnostic utilities.
+"""mdd_utils.py — Diagnostic utilities for MDD Challenge.
 
 Functions:
   audit_fp_sources        — decompose cor_nocor FPs by type and phoneme
